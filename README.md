@@ -1,5 +1,7 @@
 #Moonlight
 
+This is the forked version of Moonlight-common-c for [Moonlight Embedded](https://github.com/irtimmer/moonlight-embedded).
+
 Moonlight-common-c contains common C code between [Moonlight](http://moonlight-stream.com) clients, including 
 [Moonlight Chrome](https://github.com/moonlight-stream/moonlight-chrome) and
 [Moonlight iOS](https://github.com/moonlight-stream/moonlight-ios).
