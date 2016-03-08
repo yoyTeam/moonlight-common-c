@@ -601,7 +601,7 @@ int startControlStream(void) {
         }
 
         enet_address_set_host(&address, RemoteAddrString);
-        enet_address_set_port(&address, 47999);
+        address.port = 47999;
 
         // Connect to the host
         peer = enet_host_connect(client, &address, 1, 0);
