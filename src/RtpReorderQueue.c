@@ -2,13 +2,11 @@
 #include "RtpReorderQueue.h"
 
 void RtpqInitializeQueue(PRTP_REORDER_QUEUE queue, int maxSize, int maxQueueTimeMs) {
+    memset(queue, 0, sizeof(*queue));
     queue->maxSize = maxSize;
     queue->maxQueueTimeMs = maxQueueTimeMs;
-    queue->queueHead = NULL;
-    queue->queueTail = NULL;
     queue->nextRtpSequenceNumber = UINT16_MAX;
     queue->oldestQueuedTimeMs = UINT64_MAX;
-    queue->oldestQueuedEntry = NULL;
 }
 
 void RtpqCleanupQueue(PRTP_REORDER_QUEUE queue) {
@@ -47,7 +45,6 @@ static int queuePacket(PRTP_REORDER_QUEUE queue, PRTP_QUEUE_ENTRY newEntry, int 
 
     if (queue->oldestQueuedTimeMs == UINT64_MAX) {
         queue->oldestQueuedTimeMs = newEntry->queueTimeMs;
-        queue->oldestQueuedEntry = newEntry;
     }
 
     if (queue->queueHead == NULL) {
@@ -79,12 +76,10 @@ static void updateOldestQueued(PRTP_REORDER_QUEUE queue) {
     PRTP_QUEUE_ENTRY entry;
 
     queue->oldestQueuedTimeMs = UINT64_MAX;
-    queue->oldestQueuedEntry = NULL;
 
     entry = queue->queueHead;
     while (entry != NULL) {
         if (entry->queueTimeMs < queue->oldestQueuedTimeMs) {
-            queue->oldestQueuedEntry = entry;
             queue->oldestQueuedTimeMs = entry->queueTimeMs;
         }
 
@@ -136,7 +131,7 @@ static void removeEntry(PRTP_REORDER_QUEUE queue, PRTP_QUEUE_ENTRY entry) {
 }
 
 static PRTP_QUEUE_ENTRY validateQueueConstraints(PRTP_REORDER_QUEUE queue) {
-    int needsUpdate = 0;
+    int dequeuePacket = 0;
 
     // Empty queue is fine
     if (queue->queueHead == NULL) {
@@ -145,24 +140,19 @@ static PRTP_QUEUE_ENTRY validateQueueConstraints(PRTP_REORDER_QUEUE queue) {
 
     // Check that the queue's time constraint is satisfied
     if (PltGetMillis() - queue->oldestQueuedTimeMs > queue->maxQueueTimeMs) {
-        Limelog("Discarding RTP packet queued for too long\n");
-        removeEntry(queue, queue->oldestQueuedEntry);
-        free(queue->oldestQueuedEntry->packet);
-        needsUpdate = 1;
+        Limelog("Returning RTP packet queued for too long\n");
+        dequeuePacket = 1;
     }
 
-    // Check that the queue's size constraint is satisfied
-    if (!needsUpdate && queue->queueSize == queue->maxSize) {
-        Limelog("Discarding RTP packet after queue overgrowth\n");
-        removeEntry(queue, queue->oldestQueuedEntry);
-        free(queue->oldestQueuedEntry->packet);
-        needsUpdate = 1;
+    // Check that the queue's size constraint is satisfied. We subtract one
+    // because this is validating that the queue will meet constraints _after_
+    // the current packet is enqueued.
+    if (!dequeuePacket && queue->queueSize == queue->maxSize - 1) {
+        Limelog("Returning RTP packet after queue overgrowth\n");
+        dequeuePacket = 1;
     }
 
-    if (needsUpdate) {
-        // Recalculate the oldest entry if needed
-        updateOldestQueued(queue);
-
+    if (dequeuePacket) {
         // Return the lowest seq queued
         return getEntryByLowestSeq(queue);
     }
