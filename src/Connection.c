@@ -11,7 +11,7 @@ static long terminationCallbackErrorCode;
 char* RemoteAddrString;
 struct sockaddr_storage RemoteAddr;
 SOCKADDR_LEN RemoteAddrLen;
-int ServerMajorVersion;
+int AppVersionQuad[4];
 STREAM_CONFIGURATION StreamConfig;
 CONNECTION_LISTENER_CALLBACKS ListenerCallbacks;
 DECODER_RENDERER_CALLBACKS VideoCallbacks;
@@ -153,6 +153,7 @@ static void ClInternalConnectionTerminated(long errorCode)
 
 static int resolveHostName(const char* host)
 {
+#ifndef __vita__
     struct addrinfo hints, *res;
     int err;
 
@@ -187,18 +188,38 @@ static int resolveHostName(const char* host)
 
     freeaddrinfo(res);
     return 0;
+#else
+    struct hostent *phost = gethostbyname(host);
+    if (!phost) {
+        Limelog("gethostbyname() failed for host %s\n", host);
+        return -1;
+    }
+    struct sockaddr_in tmp = {0};
+    tmp.sin_len = sizeof(tmp);
+    tmp.sin_family = SCE_NET_AF_INET;
+    memcpy(&tmp.sin_addr, phost->h_addr, phost->h_length);
+
+    memcpy(&RemoteAddr, &tmp, sizeof(tmp));
+    RemoteAddrLen = sizeof(tmp);
+    return 0;
+#endif
 }
 
 // Starts the connection to the streaming machine
-int LiStartConnection(const char* host, PSTREAM_CONFIGURATION streamConfig, PCONNECTION_LISTENER_CALLBACKS clCallbacks,
-    PDECODER_RENDERER_CALLBACKS drCallbacks, PAUDIO_RENDERER_CALLBACKS arCallbacks,
-    void* renderContext, int drFlags, int _serverMajorVersion) {
+int LiStartConnection(PSERVER_INFORMATION serverInfo, PSTREAM_CONFIGURATION streamConfig, PCONNECTION_LISTENER_CALLBACKS clCallbacks,
+    PDECODER_RENDERER_CALLBACKS drCallbacks, PAUDIO_RENDERER_CALLBACKS arCallbacks, void* renderContext, int drFlags) {
     int err;
 
     NegotiatedVideoFormat = 0;
-    ServerMajorVersion = _serverMajorVersion;
     memcpy(&StreamConfig, streamConfig, sizeof(StreamConfig));
-    RemoteAddrString = strdup(host);
+    RemoteAddrString = strdup(serverInfo->address);
+    
+    // Extract the appversion from the supplied string
+    if (extractVersionQuadFromString(serverInfo->serverInfoAppVersion,
+                                     AppVersionQuad) < 0) {
+        Limelog("Invalid appversion string: %s\n", serverInfo->serverInfoAppVersion);
+        return -1;
+    }
 
     // Replace missing callbacks with placeholders
     fixupMissingCallbacks(&drCallbacks, &arCallbacks, &clCallbacks);
@@ -228,7 +249,7 @@ int LiStartConnection(const char* host, PSTREAM_CONFIGURATION streamConfig, PCON
 
     Limelog("Resolving host name...");
     ListenerCallbacks.stageStarting(STAGE_NAME_RESOLUTION);
-    err = resolveHostName(host);
+    err = resolveHostName(serverInfo->address);
     if (err != 0) {
         Limelog("failed: %d\n", err);
         ListenerCallbacks.stageFailed(STAGE_NAME_RESOLUTION, err);
