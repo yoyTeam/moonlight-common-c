@@ -150,6 +150,7 @@ int initializeControlStream(void) {
     stopping = 0;
     PltCreateEvent(&invalidateRefFramesEvent);
     LbqInitializeLinkedBlockingQueue(&invalidReferenceFrameTuples, 20);
+    PltCreateMutex(&enetMutex);
 
     if (AppVersionQuad[0] == 3) {
         packetTypes = (short*)packetTypesGen3;
@@ -195,6 +196,7 @@ void destroyControlStream(void) {
     LC_ASSERT(stopping);
     PltCloseEvent(&invalidateRefFramesEvent);
     freeFrameInvalidationList(LbqDestroyLinkedBlockingQueue(&invalidReferenceFrameTuples));
+    PltDeleteMutex(&enetMutex);
 }
 
 int getNextFrameInvalidationTuple(PQUEUED_FRAME_INVALIDATION_TUPLE* qfit) {
@@ -203,7 +205,8 @@ int getNextFrameInvalidationTuple(PQUEUED_FRAME_INVALIDATION_TUPLE* qfit) {
 }
 
 void queueFrameInvalidationTuple(int startFrame, int endFrame) {
-    if (VideoCallbacks.capabilities & CAPABILITY_REFERENCE_FRAME_INVALIDATION) {
+    if ((NegotiatedVideoFormat == VIDEO_FORMAT_H264 && (VideoCallbacks.capabilities & CAPABILITY_REFERENCE_FRAME_INVALIDATION_AVC)) ||
+            ((NegotiatedVideoFormat == VIDEO_FORMAT_H265 && (VideoCallbacks.capabilities & CAPABILITY_REFERENCE_FRAME_INVALIDATION_HEVC)))) {
         PQUEUED_FRAME_INVALIDATION_TUPLE qfit;
         qfit = malloc(sizeof(*qfit));
         if (qfit != NULL) {
@@ -230,11 +233,6 @@ void queueFrameInvalidationTuple(int startFrame, int endFrame) {
 void requestIdrOnDemand(void) {
     idrFrameRequired = 1;
     PltSetEvent(&invalidateRefFramesEvent);
-}
-
-// Invalidate reference frames if the decoder is too slow
-void connectionSinkTooSlow(int startFrame, int endFrame) {
-    queueFrameInvalidationTuple(startFrame, endFrame);
 }
 
 // Invalidate reference frames lost by the network
@@ -291,10 +289,20 @@ static int sendMessageEnet(short ptype, short paylen, const void* payload) {
     int err;
 
     LC_ASSERT(AppVersionQuad[0] >= 5);
+
+    // Gen 5+ servers do control protocol over ENet instead of TCP
+    while ((err = serviceEnetHost(client, &event, 0)) > 0) {
+        if (event.type == ENET_EVENT_TYPE_RECEIVE) {
+            enet_packet_destroy(event.packet);
+        }
+        else if (event.type == ENET_EVENT_TYPE_DISCONNECT) {
+            Limelog("Control stream received disconnect event\n");
+            return 0;
+        }
+    }
     
-    // We may be trying to disconnect, so our peer could be gone.
-    // This check is safe because we're guaranteed to be holding enetMutex.
-    if (peer == NULL) {
+    if (err < 0) {
+        Limelog("Control stream connection failed\n");
         return 0;
     }
 
@@ -306,25 +314,8 @@ static int sendMessageEnet(short ptype, short paylen, const void* payload) {
     packet->type = ptype;
     memcpy(&packet[1], payload, paylen);
 
-    // Gen 5+ servers do control protocol over ENet instead of TCP
-    while ((err = serviceEnetHost(client, &event, 0)) > 0) {
-        if (event.type == ENET_EVENT_TYPE_RECEIVE) {
-            enet_packet_destroy(event.packet);
-        }
-        else if (event.type == ENET_EVENT_TYPE_DISCONNECT) {
-            Limelog("Control stream received disconnect event\n");
-            free(packet);
-            return 0;
-        }
-    }
-    
-    if (err < 0) {
-        Limelog("Control stream connection failed\n");
-        return 0;
-    }
-
     enetPacket = enet_packet_create(packet, sizeof(*packet) + paylen, ENET_PACKET_FLAG_RELIABLE);
-    if (packet == NULL) {
+    if (enetPacket == NULL) {
         free(packet);
         return 0;
     }
@@ -572,13 +563,9 @@ int stopControlStream(void) {
     stopping = 1;
     LbqSignalQueueShutdown(&invalidReferenceFrameTuples);
     PltSetEvent(&invalidateRefFramesEvent);
-    
-    if (peer != NULL) {
-        PltLockMutex(&enetMutex);
-        enet_peer_disconnect_now(peer, 0);
-        peer = NULL;
-        PltUnlockMutex(&enetMutex);
-    }
+
+    // This must be set to stop in a timely manner
+    LC_ASSERT(ConnectionInterrupted);
 
     if (ctlSock != INVALID_SOCKET) {
         shutdownTcpSocket(ctlSock);
@@ -593,6 +580,10 @@ int stopControlStream(void) {
     PltCloseThread(&lossStatsThread);
     PltCloseThread(&invalidateRefFramesThread);
 
+    if (peer != NULL) {
+        enet_peer_reset(peer);
+        peer = NULL;
+    }
     if (client != NULL) {
         enet_host_destroy(client);
         client = NULL;
@@ -602,8 +593,6 @@ int stopControlStream(void) {
         closeSocket(ctlSock);
         ctlSock = INVALID_SOCKET;
     }
-
-    PltDeleteMutex(&enetMutex);
 
     return 0;
 }
@@ -623,8 +612,6 @@ int sendInputPacketOnControlStream(unsigned char* data, int length) {
 // Starts the control stream
 int startControlStream(void) {
     int err;
-
-    PltCreateMutex(&enetMutex);
 
     if (AppVersionQuad[0] >= 5) {
         ENetAddress address;
@@ -679,7 +666,19 @@ int startControlStream(void) {
         payloadLengths[IDX_START_A],
         preconstructedPayloads[IDX_START_A])) {
         Limelog("Start A failed: %d\n", (int)LastSocketError());
-        return LastSocketFail();
+        err = LastSocketFail();
+        stopping = 1;
+        if (ctlSock != INVALID_SOCKET) {
+            closeSocket(ctlSock);
+            ctlSock = INVALID_SOCKET;
+        }
+        else {
+            enet_peer_disconnect_now(peer, 0);
+            peer = NULL;
+            enet_host_destroy(client);
+            client = NULL;
+        }
+        return err;
     }
 
     // Send START B
@@ -687,16 +686,63 @@ int startControlStream(void) {
         payloadLengths[IDX_START_B],
         preconstructedPayloads[IDX_START_B])) {
         Limelog("Start B failed: %d\n", (int)LastSocketError());
-        return LastSocketFail();
+        err = LastSocketFail();
+        stopping = 1;
+        if (ctlSock != INVALID_SOCKET) {
+            closeSocket(ctlSock);
+            ctlSock = INVALID_SOCKET;
+        }
+        else {
+            enet_peer_disconnect_now(peer, 0);
+            peer = NULL;
+            enet_host_destroy(client);
+            client = NULL;
+        }
+        return err;
     }
 
     err = PltCreateThread(lossStatsThreadFunc, NULL, &lossStatsThread);
     if (err != 0) {
+        stopping = 1;
+        if (ctlSock != INVALID_SOCKET) {
+            closeSocket(ctlSock);
+            ctlSock = INVALID_SOCKET;
+        }
+        else {
+            enet_peer_disconnect_now(peer, 0);
+            peer = NULL;
+            enet_host_destroy(client);
+            client = NULL;
+        }
         return err;
     }
 
     err = PltCreateThread(invalidateRefFramesFunc, NULL, &invalidateRefFramesThread);
     if (err != 0) {
+        stopping = 1;
+
+        if (ctlSock != INVALID_SOCKET) {
+            shutdownTcpSocket(ctlSock);
+        }
+        else {
+            ConnectionInterrupted = 1;
+        }
+
+        PltInterruptThread(&lossStatsThread);
+        PltJoinThread(&lossStatsThread);
+        PltCloseThread(&lossStatsThread);
+
+        if (ctlSock != INVALID_SOCKET) {
+            closeSocket(ctlSock);
+            ctlSock = INVALID_SOCKET;
+        }
+        else {
+            enet_peer_disconnect_now(peer, 0);
+            peer = NULL;
+            enet_host_destroy(client);
+            client = NULL;
+        }
+
         return err;
     }
 

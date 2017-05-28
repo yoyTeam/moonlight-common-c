@@ -86,21 +86,34 @@ typedef struct _DECODE_UNIT {
 // renderer is non-blocking. This flag is valid on both audio and video renderers.
 #define CAPABILITY_DIRECT_SUBMIT 0x1
 
-// !!! HIGHLY EXPERIMENTAL - DO NOT SET IN PRODUCTION CODE !!!
 // If set in the video renderer capabilities field, this flag specifies that the renderer
-// supports reference frame invalidation. This flag is only valid on video renderers.
-#define CAPABILITY_REFERENCE_FRAME_INVALIDATION 0x2
+// supports reference frame invalidation for AVC/H.264 streams. This flag is only valid on video renderers.
+// If using this feature, the bitstream may not be patched (changing num_ref_frames or max_dec_frame_buffering)
+// to avoid video corruption on packet loss.
+#define CAPABILITY_REFERENCE_FRAME_INVALIDATION_AVC 0x2
+
+// If set in the video renderer capabilities field, this flag specifies that the renderer
+// supports reference frame invalidation for HEVC/H.265 streams. This flag is only valid on video renderers.
+#define CAPABILITY_REFERENCE_FRAME_INVALIDATION_HEVC 0x4
 
 // If set in the video renderer capabilities field, this macro specifies that the renderer
 // supports slicing to increase decoding performance. The parameter specifies the desired
 // number of slices per frame. This capability is only valid on video renderers.
 #define CAPABILITY_SLICES_PER_FRAME(x) (((unsigned char)(x)) << 24)
 
-// This callback is invoked to provide details about the video stream and allow configuration of the decoder
-typedef void(*DecoderRendererSetup)(int videoFormat, int width, int height, int redrawRate, void* context, int drFlags);
+// This callback is invoked to provide details about the video stream and allow configuration of the decoder.
+// Returns 0 on success, non-zero on failure.
+typedef int(*DecoderRendererSetup)(int videoFormat, int width, int height, int redrawRate, void* context, int drFlags);
 
-// This callback performs the teardown of the video decoder
+// This callback notifies the decoder that the stream is starting. No frames can be submitted before this callback returns.
+typedef void(*DecoderRendererStart)(void);
+
+// This callback notifies the decoder that the stream is stopping. Frames may still be submitted but they may be safely discarded.
+typedef void(*DecoderRendererStop)(void);
+
+// This callback performs the teardown of the video decoder. No more frames will be submitted when this callback is invoked.
 typedef void(*DecoderRendererCleanup)(void);
+
 
 // This callback provides Annex B formatted elementary stream data to the
 // decoder. If the decoder is unable to process the submitted data for some reason,
@@ -111,6 +124,8 @@ typedef int(*DecoderRendererSubmitDecodeUnit)(PDECODE_UNIT decodeUnit);
 
 typedef struct _DECODER_RENDERER_CALLBACKS {
     DecoderRendererSetup setup;
+    DecoderRendererStart start;
+    DecoderRendererStop stop;
     DecoderRendererCleanup cleanup;
     DecoderRendererSubmitDecodeUnit submitDecodeUnit;
     int capabilities;
@@ -143,10 +158,16 @@ typedef struct _OPUS_MULTISTREAM_CONFIGURATION {
 
 // This callback initializes the audio renderer. The audio configuration parameter
 // provides the negotiated audio configuration. This may differ from the one
-// specified in the stream configuration.
-typedef void(*AudioRendererInit)(int audioConfiguration, POPUS_MULTISTREAM_CONFIGURATION opusConfig);
+// specified in the stream configuration. Returns 0 on success, non-zero on failure.
+typedef int(*AudioRendererInit)(int audioConfiguration, POPUS_MULTISTREAM_CONFIGURATION opusConfig);
 
-// This callback performs the final teardown of the audio decoder
+// This callback notifies the decoder that the stream is starting. No audio can be submitted before this callback returns.
+typedef void(*AudioRendererStart)(void);
+
+// This callback notifies the decoder that the stream is stopping. Audio samples may still be submitted but they may be safely discarded.
+typedef void(*AudioRendererStop)(void);
+
+// This callback performs the final teardown of the audio decoder. No additional audio will be submitted when this callback is invoked.
 typedef void(*AudioRendererCleanup)(void);
 
 // This callback provides Opus audio data to be decoded and played. sampleLength is in bytes.
@@ -154,6 +175,8 @@ typedef void(*AudioRendererDecodeAndPlaySample)(char* sampleData, int sampleLeng
 
 typedef struct _AUDIO_RENDERER_CALLBACKS {
     AudioRendererInit init;
+    AudioRendererStart start;
+    AudioRendererStop stop;
     AudioRendererCleanup cleanup;
     AudioRendererDecodeAndPlaySample decodeAndPlaySample;
     int capabilities;
@@ -234,11 +257,17 @@ void LiInitializeServerInformation(PSERVER_INFORMATION serverInfo);
 // Callbacks are all optional. Pass NULL for individual callbacks within each struct or pass NULL for the entire struct
 // to use the defaults for all callbacks.
 //
+// This function is not thread-safe.
+//
 int LiStartConnection(PSERVER_INFORMATION serverInfo, PSTREAM_CONFIGURATION streamConfig, PCONNECTION_LISTENER_CALLBACKS clCallbacks,
     PDECODER_RENDERER_CALLBACKS drCallbacks, PAUDIO_RENDERER_CALLBACKS arCallbacks, void* renderContext, int drFlags);
 
-// This function stops streaming.
+// This function stops streaming. This function is not thread-safe.
 void LiStopConnection(void);
+
+// This function interrupts a pending LiStartConnection() call. This interruption happens asynchronously
+// so it is not safe to start another connection before the first LiStartConnection() call returns.
+void LiInterruptConnection(void);
 
 // Use to get a user-visible string to display initialization progress
 // from the integer passed to the ConnListenerStageXXX callbacks

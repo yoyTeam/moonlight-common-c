@@ -43,7 +43,11 @@ void initializeVideoDepacketizer(int pktSize) {
     gotNextFrameStart = 0;
     lastPacketInStream = -1;
     decodingFrame = 0;
-    strictIdrFrameWait = !(VideoCallbacks.capabilities & CAPABILITY_REFERENCE_FRAME_INVALIDATION);
+
+    LC_ASSERT(NegotiatedVideoFormat != 0);
+    strictIdrFrameWait =
+            !((NegotiatedVideoFormat == VIDEO_FORMAT_H264 && (VideoCallbacks.capabilities & CAPABILITY_REFERENCE_FRAME_INVALIDATION_AVC)) ||
+              ((NegotiatedVideoFormat == VIDEO_FORMAT_H265 && (VideoCallbacks.capabilities & CAPABILITY_REFERENCE_FRAME_INVALIDATION_HEVC))));
 }
 
 // Free the NAL chain
@@ -245,8 +249,8 @@ static void reassembleFrame(int frameNumber) {
                     // Flush the decode unit queue
                     freeDecodeUnitList(LbqFlushQueueItems(&decodeUnitQueue));
 
-                    // FIXME: Get proper lower bound
-                    connectionSinkTooSlow(0, frameNumber);
+                    // FIXME: Get proper bounds to use reference frame invalidation
+                    requestIdrOnDemand();
                     return;
                 }
             }
@@ -551,7 +555,7 @@ void processRtpPayload(PNV_VIDEO_PACKET videoPacket, int length) {
         // with an end flag, we can send a message to the server
         if (waitingForNextSuccessfulFrame) {
             // This is the next successful frame after a loss event
-            connectionDetectedFrameLoss(startFrameNumber, nextFrameNumber - 1);
+            connectionDetectedFrameLoss(startFrameNumber, frameIndex - 1);
             waitingForNextSuccessfulFrame = 0;
         }
 

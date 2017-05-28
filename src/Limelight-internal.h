@@ -18,6 +18,7 @@ extern CONNECTION_LISTENER_CALLBACKS ListenerCallbacks;
 extern DECODER_RENDERER_CALLBACKS VideoCallbacks;
 extern AUDIO_RENDERER_CALLBACKS AudioCallbacks;
 extern int NegotiatedVideoFormat;
+extern volatile int ConnectionInterrupted;
 
 int isBeforeSignedInt(int numA, int numB, int ambiguousCase);
 int serviceEnetHost(ENetHost* client, ENetEvent* event, enet_uint32 timeoutMs);
@@ -33,7 +34,6 @@ int startControlStream(void);
 int stopControlStream(void);
 void destroyControlStream(void);
 void requestIdrOnDemand(void);
-void connectionSinkTooSlow(int startFrame, int endFrame);
 void connectionDetectedFrameLoss(int startFrame, int endFrame);
 void connectionReceivedCompleteFrame(int frameIndex);
 void connectionSawFrame(int frameIndex);
@@ -41,7 +41,6 @@ void connectionLostPackets(int lastReceivedPacket, int nextReceivedPacket);
 int sendInputPacketOnControlStream(unsigned char* data, int length);
 
 int performRtspHandshake(void);
-void terminateRtspHandshake(void);
 
 void initializeVideoDepacketizer(int pktSize);
 void destroyVideoDepacketizer(void);
