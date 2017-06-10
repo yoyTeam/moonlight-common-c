@@ -2,8 +2,8 @@
 #include "RtpFecQueue.h"
 #include "rs.h"
 
-#define ushort(x) (unsigned short) ((x) % (UINT16_MAX+1))
-#define isBefore(x, y) ushort((x) - (y)) > (UINT16_MAX/2)
+#define ushort(x) ((unsigned short) ((x) % (UINT16_MAX+1)))
+#define isBefore(x, y) (ushort((x) - (y)) > (UINT16_MAX/2))
 
 void RtpfInitializeQueue(PRTP_FEC_QUEUE queue) {
     reed_solomon_init();
@@ -19,16 +19,19 @@ void RtpfCleanupQueue(PRTP_FEC_QUEUE queue) {
         queue->bufferHead = entry->next;
         free(entry->packet);
     }
+    
+    while (queue->queueHead != NULL) {
+        PRTPFEC_QUEUE_ENTRY entry = queue->queueHead;
+        queue->queueHead = entry->next;
+        free(entry->packet);
+    }
 }
 
 // newEntry is contained within the packet buffer so we free the whole entry by freeing entry->packet
 static int queuePacket(PRTP_FEC_QUEUE queue, PRTPFEC_QUEUE_ENTRY newEntry, int head, PRTP_PACKET packet) {
     PRTPFEC_QUEUE_ENTRY entry;
-
-    // Don't queue packets we're already ahead of
-    if (isBefore(packet->sequenceNumber, queue->nextRtpSequenceNumber)) {
-        return 0;
-    }
+    
+    LC_ASSERT(!isBefore(packet->sequenceNumber, queue->nextRtpSequenceNumber));
 
     // Don't queue duplicates either
     entry = queue->bufferHead;
@@ -69,24 +72,42 @@ static int queuePacket(PRTP_FEC_QUEUE queue, PRTPFEC_QUEUE_ENTRY newEntry, int h
     return 1;
 }
 
-static void repairPackets(PRTP_FEC_QUEUE queue) {
+// Returns 0 if the frame is completely constructed
+static int reconstructFrame(PRTP_FEC_QUEUE queue) {
     int totalPackets = ushort(queue->bufferHighestSequenceNumber - queue->bufferLowestSequenceNumber) + 1;
     int totalParityPackets = (queue->bufferDataPackets * queue->fecPercentage + 99) / 100;
     int parityPackets = totalPackets - queue->bufferDataPackets;
     int missingPackets = totalPackets - queue->bufferSize;
+    int ret;
     
-    if (parityPackets < missingPackets || parityPackets <= 0) {
-        return;
+    if (parityPackets < missingPackets) {
+        // Not enough parity data to recover yet
+        return -1;
     }
     
-    reed_solomon* rs = reed_solomon_new(queue->bufferDataPackets, totalParityPackets);
+    if (queue->receivedBufferDataPackets == queue->bufferDataPackets) {
+        // We've received a full frame with no need for FEC.
+        return 0;
+    }
 
-    int* missing = malloc(missingPackets * sizeof(int));
+    reed_solomon* rs = NULL;
     unsigned char** packets = malloc(totalPackets * sizeof(unsigned char*));
     unsigned char* marks = malloc(totalPackets * sizeof(unsigned char));
-    if (rs == NULL || missing == NULL || packets == NULL || marks == NULL)
+    if (packets == NULL || marks == NULL) {
+        ret = -2;
         goto cleanup;
-
+    }
+    
+    rs = reed_solomon_new(queue->bufferDataPackets, totalParityPackets);
+    
+    // This could happen in an OOM condition, but it could also mean the FEC data
+    // that we fed to reed_solomon_new() is bogus, so we'll assert to get a better look.
+    LC_ASSERT(rs != NULL);
+    if (rs == NULL) {
+        ret = -3;
+        goto cleanup;
+    }
+    
     rs->shards = queue->bufferDataPackets + missingPackets; //Don't let RS complain about missing parity packets
 
     memset(marks, 1, sizeof(char) * (totalPackets));
@@ -112,22 +133,27 @@ static void repairPackets(PRTP_FEC_QUEUE queue) {
     }
 
     int i;
-    int ret = -1;
     for (i = 0; i < totalPackets; i++) {
         if (marks[i]) {
             packets[i] = malloc(packetBufferSize);
             if (packets[i] == NULL) {
+                ret = -4;
                 goto cleanup_packets;
             }
         }
     }
     
     ret = reed_solomon_reconstruct(rs, packets, marks, totalPackets, receiveSize);
+    
+    // We should always provide enough parity to recover the missing data successfully.
+    // If this fails, something is probably wrong with our FEC state.
+    LC_ASSERT(ret == 0);
 
 cleanup_packets:
     for (i = 0; i < totalPackets; i++) {
         if (marks[i]) {
-            if (ret == 0) {
+            // Only submit frame data, not FEC packets
+            if (ret == 0 && i < queue->bufferDataPackets) {
                 PRTPFEC_QUEUE_ENTRY queueEntry = (PRTPFEC_QUEUE_ENTRY)&packets[i][receiveSize + sizeof(int)];
                 PRTP_PACKET rtpPacket = (PRTP_PACKET) packets[i];
                 rtpPacket->sequenceNumber = ushort(i + queue->bufferLowestSequenceNumber);
@@ -158,14 +184,13 @@ cleanup_packets:
 cleanup:
     reed_solomon_release(rs);
 
-    if (missing != NULL)
-        free(missing);
-
     if (packets != NULL)
         free(packets);
 
     if (marks != NULL)
         free(marks);
+    
+    return ret;
 }
 
 static void removeEntry(PRTP_FEC_QUEUE queue, PRTPFEC_QUEUE_ENTRY entry) {
@@ -202,33 +227,43 @@ int RtpfAddPacket(PRTP_FEC_QUEUE queue, PRTP_PACKET packet, PRTPFEC_QUEUE_ENTRY 
     }
 
     PNV_VIDEO_PACKET nvPacket = (PNV_VIDEO_PACKET)(((char*)packet) + dataOffset);
-
-    if (nvPacket->frameIndex != queue->currentFrameNumber) {
-        //Make current frame available to depacketizer
-        queue->currentFrameNumber = nvPacket->frameIndex;
-        if (queue->queueTail == NULL) {
-            queue->queueHead = queue->bufferHead;
-            queue->queueTail = queue->bufferTail;
-        } else if (queue->bufferHead != NULL) {
-            queue->queueTail->next = queue->bufferHead;
-            queue->queueTail = queue->bufferTail;
-        } else {
-            LC_ASSERT(queue->bufferTail == NULL);
-            LC_ASSERT(queue->bufferSize == 0);
+    
+    if (isBefore(nvPacket->frameIndex, queue->currentFrameNumber)) {
+        // Reject frames behind our current frame number
+        return RTPF_RET_REJECTED;
+    }
+    
+    // Reinitialize the queue if it's empty after a frame delivery or
+    // if we can't finish a frame before receiving the next one.
+    if (queue->bufferSize == 0 || queue->currentFrameNumber != nvPacket->frameIndex) {
+        if (queue->currentFrameNumber != nvPacket->frameIndex && queue->bufferSize != 0) {
+            Limelog("Unrecoverable frame %d: %d+%d=%d received < %d needed\n",
+                    queue->currentFrameNumber, queue->receivedBufferDataPackets,
+                    queue->bufferSize - queue->receivedBufferDataPackets,
+                    queue->bufferSize,
+                    queue->bufferDataPackets);
         }
         
-        queue->bufferHead = NULL;
-        queue->bufferTail = NULL;
-
-        queue->queueSize += queue->bufferSize;
+        queue->currentFrameNumber = nvPacket->frameIndex;
         queue->nextRtpSequenceNumber = queue->bufferHighestSequenceNumber;
+        
+        // Discard any unsubmitted buffers from the previous frame
+        while (queue->bufferHead != NULL) {
+            PRTPFEC_QUEUE_ENTRY entry = queue->bufferHead;
+            queue->bufferHead = entry->next;
+            free(entry->packet);
+        }
+        
+        queue->bufferTail = NULL;
+        queue->bufferSize = 0;
         
         int fecIndex = (nvPacket->fecInfo & 0xFF000) >> 12;
         queue->bufferLowestSequenceNumber = ushort(packet->sequenceNumber - fecIndex);
-        queue->bufferSize = 0;
+        queue->receivedBufferDataPackets = 0;
         queue->bufferHighestSequenceNumber = packet->sequenceNumber;
-        queue->bufferDataPackets = ((nvPacket->fecInfo & 0xFF00000) >> 20) / 4;
+        queue->bufferDataPackets = ((nvPacket->fecInfo & 0xFFF00000) >> 20) / 4;
         queue->fecPercentage = ((nvPacket->fecInfo & 0xFF0) >> 4);
+        queue->bufferFirstParitySequenceNumber = ushort(queue->bufferLowestSequenceNumber + queue->bufferDataPackets);
     } else if (isBefore(queue->bufferHighestSequenceNumber, packet->sequenceNumber)) {
         queue->bufferHighestSequenceNumber = packet->sequenceNumber;
     }
@@ -237,8 +272,30 @@ int RtpfAddPacket(PRTP_FEC_QUEUE queue, PRTP_PACKET packet, PRTPFEC_QUEUE_ENTRY 
         return RTPF_RET_REJECTED;
     }
     else {
-        if (queue->bufferSize < (ushort(packet->sequenceNumber - queue->bufferLowestSequenceNumber) + 1)) {
-            repairPackets(queue);
+        if (isBefore(packet->sequenceNumber, queue->bufferFirstParitySequenceNumber)) {
+            queue->receivedBufferDataPackets++;
+        }
+        
+        // Try to submit this frame. If we haven't received enough packets,
+        // this will fail and we'll keep waiting.
+        if (reconstructFrame(queue) == 0) {
+            // Queue the pending frame data
+            if (queue->queueTail == NULL) {
+                queue->queueHead = queue->bufferHead;
+                queue->queueTail = queue->bufferTail;
+            } else {
+                queue->queueTail->next = queue->bufferHead;
+                queue->queueTail = queue->bufferTail;
+            }
+            queue->queueSize += queue->bufferSize;
+            
+            // Clear the buffer list
+            queue->bufferHead = NULL;
+            queue->bufferTail = NULL;
+            queue->bufferSize = 0;
+            
+            // Ignore any more packets for this frame
+            queue->currentFrameNumber++;
         }
 
         return (queue->queueHead != NULL) ? RTPF_RET_QUEUED_PACKETS_READY : RTPF_RET_QUEUED_NOTHING_READY;

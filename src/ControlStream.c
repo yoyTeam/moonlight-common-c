@@ -205,6 +205,8 @@ int getNextFrameInvalidationTuple(PQUEUED_FRAME_INVALIDATION_TUPLE* qfit) {
 }
 
 void queueFrameInvalidationTuple(int startFrame, int endFrame) {
+    LC_ASSERT(startFrame <= endFrame);
+    
     if ((NegotiatedVideoFormat == VIDEO_FORMAT_H264 && (VideoCallbacks.capabilities & CAPABILITY_REFERENCE_FRAME_INVALIDATION_AVC)) ||
             ((NegotiatedVideoFormat == VIDEO_FORMAT_H265 && (VideoCallbacks.capabilities & CAPABILITY_REFERENCE_FRAME_INVALIDATION_HEVC)))) {
         PQUEUED_FRAME_INVALIDATION_TUPLE qfit;
@@ -498,7 +500,8 @@ static void requestInvalidateReferenceFrames(void) {
     long long payload[3];
     PQUEUED_FRAME_INVALIDATION_TUPLE qfit;
 
-    LC_ASSERT(VideoCallbacks.capabilities & CAPABILITY_REFERENCE_FRAME_INVALIDATION);
+    LC_ASSERT((NegotiatedVideoFormat == VIDEO_FORMAT_H264 && (VideoCallbacks.capabilities & CAPABILITY_REFERENCE_FRAME_INVALIDATION_AVC)) ||
+              (NegotiatedVideoFormat == VIDEO_FORMAT_H265 && (VideoCallbacks.capabilities & CAPABILITY_REFERENCE_FRAME_INVALIDATION_HEVC)));
 
     if (!getNextFrameInvalidationTuple(&qfit)) {
         return;
@@ -525,7 +528,7 @@ static void requestInvalidateReferenceFrames(void) {
         return;
     }
 
-    Limelog("Invalidate reference frame request sent\n");
+    Limelog("Invalidate reference frame request sent (%d to %d)\n", (int)payload[0], (int)payload[1]);
 }
 
 static void invalidateRefFramesFunc(void* context) {
