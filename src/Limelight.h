@@ -60,6 +60,14 @@ typedef struct _LENTRY {
 
 // A decode unit describes a buffer chain of video data from multiple packets
 typedef struct _DECODE_UNIT {
+    // Frame number
+    int frameNumber;
+
+    // Receive time of first buffer
+    // NOTE: This will be populated from gettimeofday() if !HAVE_CLOCK_GETTIME and
+    // populated from clock_gettime(CLOCK_MONOTONIC) if HAVE_CLOCK_GETTIME
+    unsigned long long receiveTimeMs;
+
     // Length of the entire buffer chain in bytes
     int fullLength;
 
@@ -224,6 +232,9 @@ typedef void(*ConnListenerDisplayMessage)(const char* message);
 // while streaming
 typedef void(*ConnListenerDisplayTransientMessage)(const char* message);
 
+// This callback is invoked to log debug message
+typedef void(*ConnListenerLogMessage)(const char* format, ...);
+
 typedef struct _CONNECTION_LISTENER_CALLBACKS {
     ConnListenerStageStarting stageStarting;
     ConnListenerStageComplete stageComplete;
@@ -232,6 +243,7 @@ typedef struct _CONNECTION_LISTENER_CALLBACKS {
     ConnListenerConnectionTerminated connectionTerminated;
     ConnListenerDisplayMessage displayMessage;
     ConnListenerDisplayTransientMessage displayTransientMessage;
+    ConnListenerLogMessage logMessage;
 } CONNECTION_LISTENER_CALLBACKS, *PCONNECTION_LISTENER_CALLBACKS;
 
 // Use this function to zero the connection callbacks when allocated on the stack or heap

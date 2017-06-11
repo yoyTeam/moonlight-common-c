@@ -7,20 +7,18 @@ static PLENTRY nalChainHead;
 static int nalChainDataLength;
 
 static int nextFrameNumber;
-static int nextPacketNumber;
 static int startFrameNumber;
 static int waitingForNextSuccessfulFrame;
 static int waitingForIdrFrame;
-static int gotNextFrameStart;
 static int lastPacketInStream;
 static int decodingFrame;
 static int strictIdrFrameWait;
+static unsigned long long firstPacketReceiveTime;
 
 #define CONSECUTIVE_DROP_LIMIT 120
 static int consecutiveFrameDrops;
 
 static LINKED_BLOCKING_QUEUE decodeUnitQueue;
-static unsigned int nominalPacketDataLength;
 
 typedef struct _BUFFER_DESC {
     char* data;
@@ -33,16 +31,14 @@ void initializeVideoDepacketizer(int pktSize) {
     if ((VideoCallbacks.capabilities & CAPABILITY_DIRECT_SUBMIT) == 0) {
         LbqInitializeLinkedBlockingQueue(&decodeUnitQueue, 15);
     }
-    nominalPacketDataLength = pktSize - sizeof(NV_VIDEO_PACKET);
 
     nextFrameNumber = 1;
-    nextPacketNumber = 0;
     startFrameNumber = 0;
     waitingForNextSuccessfulFrame = 0;
     waitingForIdrFrame = 1;
-    gotNextFrameStart = 0;
     lastPacketInStream = -1;
     decodingFrame = 0;
+    firstPacketReceiveTime = 0;
 
     LC_ASSERT(NegotiatedVideoFormat != 0);
     strictIdrFrameWait =
@@ -230,6 +226,8 @@ static void reassembleFrame(int frameNumber) {
         if (qdu != NULL) {
             qdu->decodeUnit.bufferList = nalChainHead;
             qdu->decodeUnit.fullLength = nalChainDataLength;
+            qdu->decodeUnit.frameNumber = frameNumber;
+            qdu->decodeUnit.receiveTimeMs = firstPacketReceiveTime;
 
             nalChainHead = NULL;
             nalChainDataLength = 0;
@@ -400,7 +398,7 @@ static void processRtpPayloadFast(BUFFER_DESC location) {
 }
 
 // Process an RTP Payload
-void processRtpPayload(PNV_VIDEO_PACKET videoPacket, int length) {
+void processRtpPayload(PNV_VIDEO_PACKET videoPacket, int length, unsigned long long receiveTimeMs) {
     BUFFER_DESC currentPos;
     int frameIndex;
     char flags;
@@ -419,54 +417,21 @@ void processRtpPayload(PNV_VIDEO_PACKET videoPacket, int length) {
     flags = videoPacket->flags;
     firstPacket = isFirstPacket(flags);
 
-    // Drop duplicates or re-ordered packets
     streamPacketIndex = videoPacket->streamPacketIndex;
-    if (isBeforeSignedInt((short)streamPacketIndex, (short)(lastPacketInStream + 1), 0)) {
-        return;
-    }
-
-    // Drop packets from a previously completed frame
-    if (isBeforeSignedInt(frameIndex, nextFrameNumber, 0)) {
-        return;
-    }
+    
+    // The packets and frames must be in sequence from the FEC queue
+    LC_ASSERT(!isBeforeSignedInt((short)streamPacketIndex, (short)(lastPacketInStream + 1), 0));
+    LC_ASSERT(!isBeforeSignedInt(frameIndex, nextFrameNumber, 0));
 
     // Notify the listener of the latest frame we've seen from the PC
     connectionSawFrame(frameIndex);
-
-    // Look for a frame start before receiving a frame end
-    if (firstPacket && decodingFrame)
-    {
-        Limelog("Network dropped end of a frame\n");
-        nextFrameNumber = frameIndex;
-
-        // Unexpected start of next frame before terminating the last
-        waitingForNextSuccessfulFrame = 1;
-        dropFrameState();
-    }
-    // Look for a non-frame start before a frame start
-    else if (!firstPacket && !decodingFrame) {
-        // Check if this looks like a real frame
-        if (flags == FLAG_CONTAINS_PIC_DATA ||
-            flags == FLAG_EOF ||
-            currentPos.length < nominalPacketDataLength)
-        {
-            Limelog("Network dropped beginning of a frame\n");
-            nextFrameNumber = frameIndex + 1;
-
-            waitingForNextSuccessfulFrame = 1;
-
-            dropFrameState();
-            decodingFrame = 0;
-            return;
-        }
-        else {
-            // FEC data
-            return;
-        }
-    }
+    
+    // Verify that we didn't receive an incomplete frame
+    LC_ASSERT(firstPacket ^ decodingFrame);
+    
     // Check sequencing of this frame to ensure we didn't
     // miss one in between
-    else if (firstPacket) {
+    if (firstPacket) {
         // Make sure this is the next consecutive frame
         if (isBeforeSignedInt(nextFrameNumber, frameIndex, 1)) {
             Limelog("Network dropped an entire frame\n");
@@ -476,32 +441,18 @@ void processRtpPayload(PNV_VIDEO_PACKET videoPacket, int length) {
             waitingForNextSuccessfulFrame = 1;
             dropFrameState();
         }
-        else if (nextFrameNumber != frameIndex) {
-            // Duplicate packet or FEC dup
-            decodingFrame = 0;
-            return;
+        else {
+            LC_ASSERT(nextFrameNumber == frameIndex);
         }
 
         // We're now decoding a frame
         decodingFrame = 1;
+        firstPacketReceiveTime = receiveTimeMs;
     }
 
-    // If it's not the first packet of a frame
-    // we need to drop it if the stream packet index
-    // doesn't match
-    if (!firstPacket && decodingFrame) {
-        if (streamPacketIndex != (int)(lastPacketInStream + 1)) {
-            Limelog("Network dropped middle of a frame\n");
-            nextFrameNumber = frameIndex + 1;
-
-            waitingForNextSuccessfulFrame = 1;
-
-            dropFrameState();
-            decodingFrame = 0;
-
-            return;
-        }
-    }
+    // This must be the first packet in a frame or be contiguous with the last
+    // packet received.
+    LC_ASSERT(firstPacket || streamPacketIndex == (int)(lastPacketInStream + 1));
 
     // Notify the server of any packet losses
     if (streamPacketIndex != (int)(lastPacketInStream + 1)) {
@@ -574,13 +525,15 @@ void processRtpPayload(PNV_VIDEO_PACKET videoPacket, int length) {
 }
 
 // Add an RTP Packet to the queue
-void queueRtpPacket(PRTP_PACKET rtpPacket, int length) {
+void queueRtpPacket(PRTPFEC_QUEUE_ENTRY queueEntry) {
     int dataOffset;
 
-    dataOffset = sizeof(*rtpPacket);
-    if (rtpPacket->header & FLAG_EXTENSION) {
+    dataOffset = sizeof(*queueEntry->packet);
+    if (queueEntry->packet->header & FLAG_EXTENSION) {
         dataOffset += 4; // 2 additional fields
     }
 
-    processRtpPayload((PNV_VIDEO_PACKET)(((char*)rtpPacket) + dataOffset), length - dataOffset);
+    processRtpPayload((PNV_VIDEO_PACKET)(((char*)queueEntry->packet) + dataOffset),
+                      queueEntry->length - dataOffset,
+                      queueEntry->receiveTimeMs);
 }
