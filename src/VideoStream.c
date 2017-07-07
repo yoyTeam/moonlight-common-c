@@ -190,7 +190,7 @@ void stopVideoStream(void) {
 }
 
 // Start the video stream
-int startVideoStream(void* rendererContext, int drFlags) {
+int startVideoStream(void* rendererContext, int drFlags, void* eglImage) {
     int err;
 
     firstFrameSocket = INVALID_SOCKET;
@@ -199,7 +199,7 @@ int startVideoStream(void* rendererContext, int drFlags) {
     // decode units
     LC_ASSERT(NegotiatedVideoFormat != 0);
     err = VideoCallbacks.setup(NegotiatedVideoFormat, StreamConfig.width,
-        StreamConfig.height, StreamConfig.fps, rendererContext, drFlags);
+        StreamConfig.height, StreamConfig.fps, rendererContext, drFlags, eglImage);
     if (err != 0) {
         return err;
     }
