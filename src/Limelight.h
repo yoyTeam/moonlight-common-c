@@ -273,7 +273,7 @@ void LiInitializeServerInformation(PSERVER_INFORMATION serverInfo);
 //
 int LiStartConnection(PSERVER_INFORMATION serverInfo, PSTREAM_CONFIGURATION streamConfig, PCONNECTION_LISTENER_CALLBACKS clCallbacks,
     PDECODER_RENDERER_CALLBACKS drCallbacks, PAUDIO_RENDERER_CALLBACKS arCallbacks, void* renderContext, int drFlags,
-    void* audioContext, int arFlags);
+    void* audioContext, int arFlags, void* eglImage);
 
 // This function stops streaming. This function is not thread-safe.
 void LiStopConnection(void);
