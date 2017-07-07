@@ -1,6 +1,6 @@
 #include "Limelight-internal.h"
 
-static int fakeDrSetup(int videoFormat, int width, int height, int redrawRate, void* context, int drFlags) { return 0; }
+static int fakeDrSetup(int videoFormat, int width, int height, int redrawRate, void* context, int drFlags, void* eglImage) { return 0; }
 static void fakeDrStart(void) {}
 static void fakeDrStop(void) {}
 static void fakeDrCleanup(void) {}
