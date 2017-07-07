@@ -111,7 +111,7 @@ typedef struct _DECODE_UNIT {
 
 // This callback is invoked to provide details about the video stream and allow configuration of the decoder.
 // Returns 0 on success, non-zero on failure.
-typedef int(*DecoderRendererSetup)(int videoFormat, int width, int height, int redrawRate, void* context, int drFlags);
+typedef int(*DecoderRendererSetup)(int videoFormat, int width, int height, int redrawRate, void* context, int drFlags, void* eglImage);
 
 // This callback notifies the decoder that the stream is starting. No frames can be submitted before this callback returns.
 typedef void(*DecoderRendererStart)(void);
@@ -136,7 +136,7 @@ typedef struct _DECODER_RENDERER_CALLBACKS {
     DecoderRendererStop stop;
     DecoderRendererCleanup cleanup;
     DecoderRendererSubmitDecodeUnit submitDecodeUnit;
-    int capabilities;
+    int capabilities;    
 } DECODER_RENDERER_CALLBACKS, *PDECODER_RENDERER_CALLBACKS;
 
 // Use this function to zero the video callbacks when allocated on the stack or heap

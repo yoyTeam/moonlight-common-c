@@ -52,7 +52,7 @@ void requestDecoderRefresh(void);
 
 void initializeVideoStream(void);
 void destroyVideoStream(void);
-int startVideoStream(void* rendererContext, int drFlags);
+int startVideoStream(void* rendererContext, int drFlags, void* eglImage);
 void stopVideoStream(void);
 
 void initializeAudioStream(void);
