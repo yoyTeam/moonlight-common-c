@@ -309,7 +309,7 @@ int LiStartConnection(PSERVER_INFORMATION serverInfo, PSTREAM_CONFIGURATION stre
     ListenerCallbacks.stageComplete(STAGE_VIDEO_STREAM_INIT);
     Limelog("done\n");
 
-/*
+
     Limelog("Initializing audio stream...");
     ListenerCallbacks.stageStarting(STAGE_AUDIO_STREAM_INIT);
     initializeAudioStream();
@@ -317,7 +317,7 @@ int LiStartConnection(PSERVER_INFORMATION serverInfo, PSTREAM_CONFIGURATION stre
     LC_ASSERT(stage == STAGE_AUDIO_STREAM_INIT);
     ListenerCallbacks.stageComplete(STAGE_AUDIO_STREAM_INIT);
     Limelog("done\n");
-*/
+
     Limelog("Initializing input stream...");
     ListenerCallbacks.stageStarting(STAGE_INPUT_STREAM_INIT);
     initializeInputStream();
@@ -352,7 +352,7 @@ int LiStartConnection(PSERVER_INFORMATION serverInfo, PSTREAM_CONFIGURATION stre
     ListenerCallbacks.stageComplete(STAGE_VIDEO_STREAM_START);
     Limelog("done\n");
 
-    /*
+
 
     Limelog("Starting audio stream...");
     ListenerCallbacks.stageStarting(STAGE_AUDIO_STREAM_START);
@@ -366,7 +366,7 @@ int LiStartConnection(PSERVER_INFORMATION serverInfo, PSTREAM_CONFIGURATION stre
     LC_ASSERT(stage == STAGE_AUDIO_STREAM_START);
     ListenerCallbacks.stageComplete(STAGE_AUDIO_STREAM_START);
     Limelog("done\n");
-*/
+
 
     Limelog("Starting input stream...");
     ListenerCallbacks.stageStarting(STAGE_INPUT_STREAM_START);
